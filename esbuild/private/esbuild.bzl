@@ -318,6 +318,7 @@ def _esbuild_impl(ctx):
     )
 
     launcher = ctx.executable.launcher or esbuild_toolinfo.launcher.files_to_run
+    # final_inputs += [sandbox_list]
     ctx.actions.run(
         inputs = input_sources,
         outputs = output_sources,

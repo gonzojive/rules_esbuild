@@ -97,6 +97,9 @@ async function processConfigFile(configFilePath, existingArgs = {}) {
   }, {})
 }
 
+
+process.exit(1);
+
 if (!process.env.ESBUILD_BINARY_PATH) {
   console.error('Expected environment variable ESBUILD_BINARY_PATH to be set')
   process.exit(1)
