@@ -1,5 +1,7 @@
 const _fs = require('fs');
-const { readFileSync, writeFileSync, readdirSync, realpathSync } = _fs._unpatched;
+// Use the _unpatched extension of fs from
+// https://github.com/aspect-build/rules_js/pull/793.
+const { readFileSync, writeFileSync, readdirSync, realpathSync } = _fs._unpatched || _fs;
 const { pathToFileURL } = require('url')
 const { join, resolve } = require('path')
 const esbuild = require('esbuild')
@@ -98,31 +100,17 @@ async function processConfigFile(configFilePath, existingArgs = {}) {
   }, {})
 }
 
-const bazelSandboxAwareOnResolvePlugin = {
+const bazelSandboxPlugin = {
   name: 'Bazel Sandbox Guard',
   setup(build) {
-    const BAZEL_BINDIR = process.env.BAZEL_BINDIR;
-    // process.cwd() appears to already be BAZEL_BINDIR for some reason.
+    // Generate an allowlist with all the files and the targets of symlinks from
+    // the bin directory for this execution.
+    //
+    // Note that process.cwd() appears to already be BAZEL_BINDIR.
     const sandbox = new SandboxContents(process.cwd());
-
-    build.onResolve({ filter: /.*/ }, args => {
-      console.log(`resolved args %s; sandbox files = ${JSON.stringify(sandbox.files)}`, args);
-      if (args.resolveDir.indexOf(BAZEL_BINDIR) === -1) {
-        return {
-          errors: [
-            {
-              text: `Failed to resolve import '${args.path}'. Ensure that it is a dependency of an upstream target`,
-              location: null,
-            }
-          ]
-        }
-      }
-    });
-
     // See https://esbuild.github.io/plugins/#on-load-arguments for docs about
     // onLoad.
     build.onLoad({ filter: /.*/ }, args => {
-      console.log(`onLoad args %s; sandbox files = ${JSON.stringify(sandbox.files)}`, args);
       sandbox.checkFileIsInSandbox(args.path);
     });
   }
@@ -152,12 +140,13 @@ async function runOneBuild(args, userArgsFilePath, configFilePath) {
     }
   }
 
-  // If running under rules_js, add a plugin that attempts to keep resolves within the bin dir.
+  // If running under rules_js, add a plugin that attempts to restrict file
+  // system access within the sandbox.
   if (process.env.BAZEL_BINDIR) {
     if (args.hasOwnProperty('plugins')) {
-      args.plugins.push(bazelSandboxAwareOnResolvePlugin)
+      args.plugins.push(bazelSandboxPlugin)
     } else {
-      args.plugins = [bazelSandboxAwareOnResolvePlugin]
+      args.plugins = [bazelSandboxPlugin]
     }
 
     // Never preserve symlinks as this breaks the pnpm node_modules layout.
@@ -190,10 +179,6 @@ class SandboxContents {
       this.allowedPaths.add(f.realPathResolved);
       this.allowedPaths.add(f.pathResolved);
     });
-    // this.realFiles = new Map();
-    // for (const file of this.files) {
-    //   this.realFiles
-    // }
   }
 
   /**
@@ -203,9 +188,20 @@ class SandboxContents {
    * @returns {boolean} true if the file is in the sandbox.
    */
   inSandbox(absPath) {
-    return !!this.files.find((entry) => {
-      return entry.realPathResolved === absPath || entry.pathResolved === absPath;
-    });
+    return this.allowedPaths.has(absPath);
+  }
+
+  /**
+   * @returns {string} debug summary of the sandbox contents.
+   */
+  sandboxSummary(indent) {
+    indent = indent || '';
+    return this.files.map((entry) => {
+      if (entry.isSymbolicLink) {
+        return `${indent}${entry.pathResolved} ->\n${indent}  ${entry.realPathResolved}`;
+      }
+      return indent + entry.realPathResolved;
+    }).join('\n');
   }
 
   checkFileIsInSandbox(somePath) {
@@ -213,13 +209,12 @@ class SandboxContents {
     if (this.inSandbox(absPath)) {
       return;
     }
-    const sandboxEntries = this.files.map((entry) => {
-      if (entry.isSymbolicLink) {
-        return `${entry.pathResolved} -> ${entry.realPathResolved}`;
-      }
-      return entry.realPathResolved;
-    }).join('\n');
-    throw new Error(`loaded file is not allowed because the file is not within the bazel sandbox. Check the deps of the esbuild rule. ${sandboxEntries.length} known sandbox entries:\n${absPath} is not in [\n${sandboxEntries}\n]`);
+    
+    throw new Error(
+      `loaded file is not allowed because the file is not within the bazel ` +
+      `sandbox. Check the deps of the esbuild rule. \n` +
+      `${absPath} is not in list of ${this.files.length} sandbox entries:\n` + 
+      `${this.sandboxSummary()}`);
   }
 }
 
@@ -235,7 +230,6 @@ function listAllFiles(folder) {
         path: file.name,
         pathResolved: resolve(file.name),
         isSymbolicLink: file.isSymbolicLink(),
-        realPath: realPath,
         realPathResolved: resolve(realPath),
       });
     }
