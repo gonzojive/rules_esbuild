@@ -1,6 +1,7 @@
-const { readFileSync, writeFileSync } = require('fs')
+const _fs = require('fs');
+const { readFileSync, writeFileSync, readdirSync, realpathSync } = _fs._unpatched;
 const { pathToFileURL } = require('url')
-const { join } = require('path')
+const { join, resolve } = require('path')
 const esbuild = require('esbuild')
 
 function getFlag(flag, required = true) {
@@ -97,8 +98,38 @@ async function processConfigFile(configFilePath, existingArgs = {}) {
   }, {})
 }
 
+const bazelSandboxAwareOnResolvePlugin = {
+  name: 'Bazel Sandbox Guard',
+  setup(build) {
+    const BAZEL_BINDIR = process.env.BAZEL_BINDIR;
+    // process.cwd() appears to already be BAZEL_BINDIR for some reason.
+    const sandbox = new SandboxContents(process.cwd());
 
-process.exit(1);
+    build.onResolve({ filter: /.*/ }, args => {
+      console.log(`resolved args %s; sandbox files = ${JSON.stringify(sandbox.files)}`, args);
+      if (args.resolveDir.indexOf(BAZEL_BINDIR) === -1) {
+        return {
+          errors: [
+            {
+              text: `Failed to resolve import '${args.path}'. Ensure that it is a dependency of an upstream target`,
+              location: null,
+            }
+          ]
+        }
+      }
+    });
+
+    // See https://esbuild.github.io/plugins/#on-load-arguments for docs about
+    // onLoad.
+    build.onLoad({ filter: /.*/ }, args => {
+      console.log(`onLoad args %s; sandbox files = ${JSON.stringify(sandbox.files)}`, args);
+      sandbox.checkFileIsInSandbox(args.path);
+    });
+  }
+}
+
+
+// process.exit(1);
 
 if (!process.env.ESBUILD_BINARY_PATH) {
   console.error('Expected environment variable ESBUILD_BINARY_PATH to be set')
@@ -121,6 +152,18 @@ async function runOneBuild(args, userArgsFilePath, configFilePath) {
     }
   }
 
+  // If running under rules_js, add a plugin that attempts to keep resolves within the bin dir.
+  if (process.env.BAZEL_BINDIR) {
+    if (args.hasOwnProperty('plugins')) {
+      args.plugins.push(bazelSandboxAwareOnResolvePlugin)
+    } else {
+      args.plugins = [bazelSandboxAwareOnResolvePlugin]
+    }
+
+    // Never preserve symlinks as this breaks the pnpm node_modules layout.
+    args.preserveSymlinks = false
+  }
+
   try {
     const result = await esbuild.build(args)
     if (result.metafile) {
@@ -131,6 +174,73 @@ async function runOneBuild(args, userArgsFilePath, configFilePath) {
     console.error(e)
     process.exit(1)
   }
+}
+
+/**
+ * @param {Array<>} files
+ */
+class SandboxContents {
+  /**
+   * @param {string} sandboxRoot Path to root of sandbox.
+   */
+  constructor(sandboxRoot) {
+    this.files = listAllFiles(sandboxRoot);
+    this.allowedPaths = new Set();
+    this.files.forEach(f => {
+      this.allowedPaths.add(f.realPathResolved);
+      this.allowedPaths.add(f.pathResolved);
+    });
+    // this.realFiles = new Map();
+    // for (const file of this.files) {
+    //   this.realFiles
+    // }
+  }
+
+  /**
+   * Returns true if the given path is in the sandbox.
+   *
+   * @param {string} absPath The absolute path of some file.
+   * @returns {boolean} true if the file is in the sandbox.
+   */
+  inSandbox(absPath) {
+    return !!this.files.find((entry) => {
+      return entry.realPathResolved === absPath || entry.pathResolved === absPath;
+    });
+  }
+
+  checkFileIsInSandbox(somePath) {
+    const absPath = resolve(realpathSync(somePath));
+    if (this.inSandbox(absPath)) {
+      return;
+    }
+    const sandboxEntries = this.files.map((entry) => {
+      if (entry.isSymbolicLink) {
+        return `${entry.pathResolved} -> ${entry.realPathResolved}`;
+      }
+      return entry.realPathResolved;
+    }).join('\n');
+    throw new Error(`loaded file is not allowed because the file is not within the bazel sandbox. Check the deps of the esbuild rule. ${sandboxEntries.length} known sandbox entries:\n${absPath} is not in [\n${sandboxEntries}\n]`);
+  }
+}
+
+function listAllFiles(folder) {
+  const out = [];
+  console.log(`listing files with CWD=${process.cwd()} in folder ${JSON.stringify(folder)}`);
+  readdirSync(folder, {withFileTypes: true}).forEach(file => {
+    if (file.isDirectory()) {
+      out.push(...listAllFiles(file.name));
+    } else {
+      const realPath = realpathSync(file.name);
+      out.push({
+        path: file.name,
+        pathResolved: resolve(file.name),
+        isSymbolicLink: file.isSymbolicLink(),
+        realPath: realPath,
+        realPathResolved: resolve(realPath),
+      });
+    }
+  });
+  return out;
 }
 
 runOneBuild(
