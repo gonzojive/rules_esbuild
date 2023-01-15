@@ -303,43 +303,12 @@ def _esbuild_impl(ctx):
     #     inputs.append(ctx.version_file)
     #     env["BAZEL_VERSION_FILE"] = ctx.version_file.path
 
-
-    sandbox_list = ctx.actions.declare_file("%s_sandbox.txt" % ctx.attr.name)
-    copied_srcs = copy_files_to_bin_actions(ctx, [
-        file
-        for file in ctx.files.srcs
-        if not (file.path.endswith(".d.ts") or file.path.endswith(".tsbuildinfo"))
-    ])
     input_sources = depset(
-        copied_srcs
-         + entry_points_bin_copy
-         + other_inputs
-         + node_toolinfo.tool_files
-         + esbuild_toolinfo.tool_files,
-        transitive = [js_lib_helpers.gather_files_from_js_providers(
-            targets = ctx.attr.srcs + ctx.attr.deps,
-            include_transitive_sources = True,
-            include_declarations = False,
-            include_npm_linked_packages = True,
-        )],
-    )
-    ctx.actions.run_shell(
-        inputs = input_sources,
-        mnemonic = "PrintSandboxContents",
-        command = "echo '\n##### SANDBOX BEFORE RUNNING launcher.js' && env && find . -type f,d,l > " + sandbox_list.path,
-        outputs = [
-            sandbox_list,
-        ],
-        env = env,
-    )
-
-    input_sources2 = depset(
-        copied_srcs
-         + [sandbox_list]
-         + entry_points_bin_copy
-         + other_inputs
-         + node_toolinfo.tool_files
-         + esbuild_toolinfo.tool_files,
+        copy_files_to_bin_actions(ctx, [
+            file
+            for file in ctx.files.srcs
+            if not (file.path.endswith(".d.ts") or file.path.endswith(".tsbuildinfo"))
+        ]) + entry_points_bin_copy + other_inputs + node_toolinfo.tool_files + esbuild_toolinfo.tool_files,
         transitive = [js_lib_helpers.gather_files_from_js_providers(
             targets = ctx.attr.srcs + ctx.attr.deps,
             include_transitive_sources = True,
@@ -348,11 +317,9 @@ def _esbuild_impl(ctx):
         )],
     )
 
-    
     launcher = ctx.executable.launcher or esbuild_toolinfo.launcher.files_to_run
-    #input_sources.append(sandbox_list)
     ctx.actions.run(
-        inputs = input_sources2,
+        inputs = input_sources,
         outputs = output_sources,
         arguments = [launcher_args],
         progress_message = "%s Javascript %s [esbuild]" % ("Bundling" if not ctx.attr.output_dir else "Splitting", " ".join([_bin_relative_path(ctx, entry_point) for entry_point in entry_points])),

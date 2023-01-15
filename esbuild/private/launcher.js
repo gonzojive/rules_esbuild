@@ -166,18 +166,19 @@ async function runOneBuild(args, userArgsFilePath, configFilePath) {
 }
 
 /**
- * @param {Array<>} files
+ * An index of files within the sandbox and some methods for checking that a
+ * given path is within the sandbox.
  */
 class SandboxContents {
   /**
    * @param {string} sandboxRoot Path to root of sandbox.
    */
   constructor(sandboxRoot) {
-    this.files = listAllFiles(sandboxRoot);
-    this.allowedPaths = new Set();
-    this.files.forEach(f => {
-      this.allowedPaths.add(f.realPathResolved);
-      this.allowedPaths.add(f.pathResolved);
+    this._files = listAllFiles(sandboxRoot);
+    this._allowedPaths = new Set();
+    this._files.forEach(f => {
+      this._allowedPaths.add(f.realPathResolved);
+      this._allowedPaths.add(f.pathResolved);
     });
   }
 
@@ -188,7 +189,7 @@ class SandboxContents {
    * @returns {boolean} true if the file is in the sandbox.
    */
   inSandbox(absPath) {
-    return this.allowedPaths.has(absPath);
+    return this._allowedPaths.has(absPath);
   }
 
   /**
@@ -196,7 +197,7 @@ class SandboxContents {
    */
   sandboxSummary(indent) {
     indent = indent || '';
-    return this.files.map((entry) => {
+    return this._files.map((entry) => {
       if (entry.isSymbolicLink) {
         return `${indent}${entry.pathResolved} ->\n${indent}  ${entry.realPathResolved}`;
       }
@@ -204,6 +205,10 @@ class SandboxContents {
     }).join('\n');
   }
 
+  /**
+   * @param {string} somePath path to some file.
+   * @throws {Error} if the path is not in the sandbox.
+   */
   checkFileIsInSandbox(somePath) {
     const absPath = resolve(realpathSync(somePath));
     if (this.inSandbox(absPath)) {
@@ -213,7 +218,7 @@ class SandboxContents {
     throw new Error(
       `loaded file is not allowed because the file is not within the bazel ` +
       `sandbox. Check the deps of the esbuild rule. \n` +
-      `${absPath} is not in list of ${this.files.length} sandbox entries:\n` + 
+      `${absPath} is not in list of ${this._files.length} sandbox entries:\n` + 
       `${this.sandboxSummary()}`);
   }
 }
